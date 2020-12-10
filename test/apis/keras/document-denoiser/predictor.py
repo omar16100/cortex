@@ -1,9 +1,14 @@
 # WARNING: you are on the master branch; please refer to examples on the branch corresponding to your `cortex version` (e.g. for version 0.24.*, run `git checkout -b 0.24` or switch to the `0.24` branch on GitHub)
 
-import boto3, base64, cv2, re, os, requests
+import base64
+import boto3
+import cv2
+import numpy as np
+import os
+import re
+import requests
 from botocore import UNSIGNED
 from botocore.client import Config
-import numpy as np
 from tensorflow.keras.models import load_model
 
 

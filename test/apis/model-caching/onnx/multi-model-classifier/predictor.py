@@ -1,7 +1,8 @@
 # WARNING: you are on the master branch; please refer to examples on the branch corresponding to your `cortex version` (e.g. for version 0.24.*, run `git checkout -b 0.24` or switch to the `0.24` branch on GitHub)
 
+import cv2
 import numpy as np
-import cv2, requests
+import requests
 from scipy.special import softmax
 
 
@@ -81,6 +82,7 @@ class ONNXPredictor:
     def predict(self, payload, query_params):
         # get request params
         model_name = query_params["model"]
+        model_version = query_params.get("version", "latest")
         img_url = payload["url"]
 
         # process the input
@@ -89,10 +91,10 @@ class ONNXPredictor:
         img = preprocess(img)
 
         # predict
-        results = self.client.predict(img, model_name)[0]
+        results = self.client.predict(img, model_name, model_version)[0]
 
         # interpret result
         result = postprocess(results)
         predicted_label = self.image_classes[result]
 
-        return {"label": predicted_label}
+        return {"label": predicted_label, "model": {"name": model_name, "version": model_version}}

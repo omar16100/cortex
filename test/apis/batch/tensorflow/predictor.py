@@ -1,30 +1,23 @@
 # WARNING: you are on the master branch; please refer to examples on the branch corresponding to your `cortex version` (e.g. for version 0.24.*, run `git checkout -b 0.24` or switch to the `0.24` branch on GitHub)
 
-import requests
-import numpy as np
-import base64
-from PIL import Image
-from io import BytesIO
-from torchvision import transforms
-import boto3
 import json
-import re
 import os
+import re
+from io import BytesIO
+
+import boto3
+import numpy as np
+import requests
+import tensorflow as tf
+from PIL import Image
 
 
-class ONNXPredictor:
-    def __init__(self, onnx_client, config, job_spec):
-        self.client = onnx_client
-
+class TensorFlowPredictor:
+    def __init__(self, tensorflow_client, config, job_spec):
+        self.client = tensorflow_client
         self.labels = requests.get(
             "https://storage.googleapis.com/download.tensorflow.org/data/ImageNetLabels.txt"
         ).text.split("\n")[1:]
-
-        # https://github.com/pytorch/examples/blob/447974f6337543d4de6b888e244a964d3c9b71f6/imagenet/main.py#L198-L199
-        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        self.preprocess = transforms.Compose(
-            [transforms.Resize(256), transforms.CenterCrop(224), transforms.ToTensor(), normalize]
-        )
 
         if len(config.get("dest_s3_dir", "")) == 0:
             raise Exception("'dest_s3_dir' field was not provided in job submission")
@@ -45,15 +38,19 @@ class ONNXPredictor:
             else:
                 image_bytes = requests.get(image_url).content
 
-            img_pil = Image.open(BytesIO(image_bytes))
-            arr_list.append(self.preprocess(img_pil).numpy())
+            decoded_image = np.asarray(Image.open(BytesIO(image_bytes)), dtype=np.float32) / 255
+            resized_image = tf.image.resize(
+                decoded_image, [224, 224], method=tf.image.ResizeMethod.BILINEAR
+            )
+            arr_list.append(resized_image)
 
         # classify the batch of images
-        imgs_arr = np.stack(arr_list, axis=0)
-        result = self.client.predict(imgs_arr)
+        model_input = {"images": np.stack(arr_list, axis=0)}
+        predictions = self.client.predict(model_input)
 
         # extract predicted classes
-        predicted_classes = np.argmax(result[0], axis=1)
+        reshaped_predictions = np.reshape(np.array(predictions["classes"]), [-1, len(self.labels)])
+        predicted_classes = np.argmax(reshaped_predictions, axis=1)
         results = [
             {"url": payload[i], "class": self.labels[class_idx]}
             for i, class_idx in enumerate(predicted_classes)
