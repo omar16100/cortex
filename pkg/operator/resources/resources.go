@@ -305,6 +305,9 @@ func DeleteAPI(apiName string, keepCache bool) (*schema.DeleteResponse, error) {
 				func() error {
 					return trafficsplitter.DeleteAPI(apiName, keepCache)
 				},
+				func() error {
+					return taskapi.DeleteAPI(apiName, keepCache)
+				},
 			)
 			if err != nil {
 				telemetry.Error(err)
