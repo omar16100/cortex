@@ -14,10 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package batchapi
+package job
 
 import (
-	"fmt"
 	"path"
 	"path/filepath"
 	"time"
@@ -27,22 +26,21 @@ import (
 	"github.com/cortexlabs/cortex/pkg/operator/config"
 	"github.com/cortexlabs/cortex/pkg/types/spec"
 	"github.com/cortexlabs/cortex/pkg/types/status"
-	kbatch "k8s.io/api/batch/v1"
-	kcore "k8s.io/api/core/v1"
+	"github.com/cortexlabs/cortex/pkg/types/userconfig"
 )
 
 const (
 	_averageFilesPerJobState = 10
 )
 
-type JobState struct {
+type State struct {
 	spec.JobKey
 	Status         status.JobCode
 	LastUpdatedMap map[string]time.Time
 	EndTime        *time.Time
 }
 
-func (j JobState) GetLastUpdated() time.Time {
+func (j State) GetLastUpdated() time.Time {
 	lastUpdated := time.Time{}
 
 	for _, fileLastUpdated := range j.LastUpdatedMap {
@@ -55,7 +53,7 @@ func (j JobState) GetLastUpdated() time.Time {
 }
 
 // Doesn't assume only status files are present. The order below matters.
-func getStatusCode(lastUpdatedMap map[string]time.Time) status.JobCode {
+func GetStatusCode(lastUpdatedMap map[string]time.Time) status.JobCode {
 	if _, ok := lastUpdatedMap[status.JobStopped.String()]; ok {
 		return status.JobStopped
 	}
@@ -95,7 +93,31 @@ func getStatusCode(lastUpdatedMap map[string]time.Time) status.JobCode {
 	return status.JobUnknown
 }
 
-func getJobState(jobKey spec.JobKey) (*JobState, error) {
+func SetStatusForJob(jobKey spec.JobKey, jobStatus status.JobCode) error {
+	switch jobStatus {
+	case status.JobEnqueuing:
+		return SetEnqueuingStatus(jobKey)
+	case status.JobRunning:
+		return SetRunningStatus(jobKey)
+	case status.JobEnqueueFailed:
+		return SetEnqueueFailedStatus(jobKey)
+	case status.JobCompletedWithFailures:
+		return SetCompletedWithFailuresStatus(jobKey)
+	case status.JobSucceeded:
+		return SetSucceededStatus(jobKey)
+	case status.JobUnexpectedError:
+		return SetUnexpectedErrorStatus(jobKey)
+	case status.JobWorkerError:
+		return SetWorkerErrorStatus(jobKey)
+	case status.JobWorkerOOM:
+		return SetWorkerOOMStatus(jobKey)
+	case status.JobStopped:
+		return SetStoppedStatus(jobKey)
+	}
+	return nil
+}
+
+func GetJobState(jobKey spec.JobKey) (*State, error) {
 	s3Objects, err := config.AWS.ListS3Prefix(config.Cluster.Bucket, jobKey.Prefix(config.Cluster.ClusterName), false, nil)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to get job state", jobKey.UserString())
@@ -115,8 +137,8 @@ func getJobState(jobKey spec.JobKey) (*JobState, error) {
 	return &jobState, nil
 }
 
-func getJobStateFromFiles(jobKey spec.JobKey, lastUpdatedFileMap map[string]time.Time) JobState {
-	statusCode := getStatusCode(lastUpdatedFileMap)
+func getJobStateFromFiles(jobKey spec.JobKey, lastUpdatedFileMap map[string]time.Time) State {
+	statusCode := GetStatusCode(lastUpdatedFileMap)
 
 	var jobEndTime *time.Time
 	if statusCode.IsCompleted() {
@@ -125,7 +147,7 @@ func getJobStateFromFiles(jobKey spec.JobKey, lastUpdatedFileMap map[string]time
 		}
 	}
 
-	return JobState{
+	return State{
 		JobKey:         jobKey,
 		LastUpdatedMap: lastUpdatedFileMap,
 		Status:         statusCode,
@@ -133,9 +155,14 @@ func getJobStateFromFiles(jobKey spec.JobKey, lastUpdatedFileMap map[string]time
 	}
 }
 
-func getMostRecentlySubmittedJobStates(apiName string, count int) ([]*JobState, error) {
+func GetMostRecentlySubmittedJobStates(apiName string, count int, kind userconfig.Kind) ([]*State, error) {
 	// a single job state may include 5 files on average, overshoot the number of files needed
-	s3Objects, err := config.AWS.ListS3Prefix(config.Cluster.Bucket, spec.BatchAPIJobPrefix(apiName, config.Cluster.ClusterName), false, pointer.Int64(int64(count*_averageFilesPerJobState)))
+	s3Objects, err := config.AWS.ListS3Prefix(
+		config.Cluster.Bucket,
+		spec.JobAPIPrefix(apiName, config.Cluster.ClusterName, kind),
+		false,
+		pointer.Int64(int64(count*_averageFilesPerJobState)),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -156,7 +183,7 @@ func getMostRecentlySubmittedJobStates(apiName string, count int) ([]*JobState, 
 		}
 	}
 
-	jobStates := make([]*JobState, 0, count)
+	jobStates := make([]*State, 0, count)
 
 	jobStateCount := 0
 	for _, jobID := range jobIDOrder {
@@ -172,31 +199,7 @@ func getMostRecentlySubmittedJobStates(apiName string, count int) ([]*JobState, 
 	return jobStates, nil
 }
 
-func setStatusForJob(jobKey spec.JobKey, jobStatus status.JobCode) error {
-	switch jobStatus {
-	case status.JobEnqueuing:
-		return setEnqueuingStatus(jobKey)
-	case status.JobRunning:
-		return setRunningStatus(jobKey)
-	case status.JobEnqueueFailed:
-		return setEnqueueFailedStatus(jobKey)
-	case status.JobCompletedWithFailures:
-		return setCompletedWithFailuresStatus(jobKey)
-	case status.JobSucceeded:
-		return setSucceededStatus(jobKey)
-	case status.JobUnexpectedError:
-		return setUnexpectedErrorStatus(jobKey)
-	case status.JobWorkerError:
-		return setWorkerErrorStatus(jobKey)
-	case status.JobWorkerOOM:
-		return setWorkerOOMStatus(jobKey)
-	case status.JobStopped:
-		return setStoppedStatus(jobKey)
-	}
-	return nil
-}
-
-func setEnqueuingStatus(jobKey spec.JobKey) error {
+func SetEnqueuingStatus(jobKey spec.JobKey) error {
 	err := config.AWS.UploadStringToS3("", config.Cluster.Bucket, path.Join(jobKey.Prefix(config.Cluster.ClusterName), status.JobEnqueuing.String()))
 	if err != nil {
 		return err
@@ -210,7 +213,21 @@ func setEnqueuingStatus(jobKey spec.JobKey) error {
 	return nil
 }
 
-func setRunningStatus(jobKey spec.JobKey) error {
+func SetFailedStatus(jobKey spec.JobKey) error {
+	err := config.AWS.UploadStringToS3("", config.Cluster.Bucket, path.Join(jobKey.Prefix(config.Cluster.ClusterName), status.JobEnqueueFailed.String()))
+	if err != nil {
+		return err
+	}
+
+	err = DeleteInProgressFile(jobKey)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func SetRunningStatus(jobKey spec.JobKey) error {
 	err := config.AWS.UploadStringToS3("", config.Cluster.Bucket, path.Join(jobKey.Prefix(config.Cluster.ClusterName), status.JobRunning.String()))
 	if err != nil {
 		return err
@@ -224,13 +241,13 @@ func setRunningStatus(jobKey spec.JobKey) error {
 	return nil
 }
 
-func setStoppedStatus(jobKey spec.JobKey) error {
+func SetStoppedStatus(jobKey spec.JobKey) error {
 	err := config.AWS.UploadStringToS3("", config.Cluster.Bucket, path.Join(jobKey.Prefix(config.Cluster.ClusterName), status.JobStopped.String()))
 	if err != nil {
 		return err
 	}
 
-	err = deleteInProgressFile(jobKey)
+	err = DeleteInProgressFile(jobKey)
 	if err != nil {
 		return err
 	}
@@ -238,13 +255,13 @@ func setStoppedStatus(jobKey spec.JobKey) error {
 	return nil
 }
 
-func setSucceededStatus(jobKey spec.JobKey) error {
+func SetSucceededStatus(jobKey spec.JobKey) error {
 	err := config.AWS.UploadStringToS3("", config.Cluster.Bucket, path.Join(jobKey.Prefix(config.Cluster.ClusterName), status.JobSucceeded.String()))
 	if err != nil {
 		return err
 	}
 
-	err = deleteInProgressFile(jobKey)
+	err = DeleteInProgressFile(jobKey)
 	if err != nil {
 		return err
 	}
@@ -252,13 +269,13 @@ func setSucceededStatus(jobKey spec.JobKey) error {
 	return nil
 }
 
-func setCompletedWithFailuresStatus(jobKey spec.JobKey) error {
+func SetCompletedWithFailuresStatus(jobKey spec.JobKey) error {
 	err := config.AWS.UploadStringToS3("", config.Cluster.Bucket, path.Join(jobKey.Prefix(config.Cluster.ClusterName), status.JobCompletedWithFailures.String()))
 	if err != nil {
 		return err
 	}
 
-	err = deleteInProgressFile(jobKey)
+	err = DeleteInProgressFile(jobKey)
 	if err != nil {
 		return err
 	}
@@ -266,13 +283,13 @@ func setCompletedWithFailuresStatus(jobKey spec.JobKey) error {
 	return nil
 }
 
-func setWorkerErrorStatus(jobKey spec.JobKey) error {
+func SetWorkerErrorStatus(jobKey spec.JobKey) error {
 	err := config.AWS.UploadStringToS3("", config.Cluster.Bucket, path.Join(jobKey.Prefix(config.Cluster.ClusterName), status.JobWorkerError.String()))
 	if err != nil {
 		return err
 	}
 
-	err = deleteInProgressFile(jobKey)
+	err = DeleteInProgressFile(jobKey)
 	if err != nil {
 		return err
 	}
@@ -280,13 +297,13 @@ func setWorkerErrorStatus(jobKey spec.JobKey) error {
 	return nil
 }
 
-func setWorkerOOMStatus(jobKey spec.JobKey) error {
+func SetWorkerOOMStatus(jobKey spec.JobKey) error {
 	err := config.AWS.UploadStringToS3("", config.Cluster.Bucket, path.Join(jobKey.Prefix(config.Cluster.ClusterName), status.JobWorkerOOM.String()))
 	if err != nil {
 		return err
 	}
 
-	err = deleteInProgressFile(jobKey)
+	err = DeleteInProgressFile(jobKey)
 	if err != nil {
 		return err
 	}
@@ -294,13 +311,13 @@ func setWorkerOOMStatus(jobKey spec.JobKey) error {
 	return nil
 }
 
-func setEnqueueFailedStatus(jobKey spec.JobKey) error {
+func SetEnqueueFailedStatus(jobKey spec.JobKey) error {
 	err := config.AWS.UploadStringToS3("", config.Cluster.Bucket, path.Join(jobKey.Prefix(config.Cluster.ClusterName), status.JobEnqueueFailed.String()))
 	if err != nil {
 		return err
 	}
 
-	err = deleteInProgressFile(jobKey)
+	err = DeleteInProgressFile(jobKey)
 	if err != nil {
 		return err
 	}
@@ -308,135 +325,16 @@ func setEnqueueFailedStatus(jobKey spec.JobKey) error {
 	return nil
 }
 
-func setUnexpectedErrorStatus(jobKey spec.JobKey) error {
+func SetUnexpectedErrorStatus(jobKey spec.JobKey) error {
 	err := config.AWS.UploadStringToS3("", config.Cluster.Bucket, path.Join(jobKey.Prefix(config.Cluster.ClusterName), status.JobUnexpectedError.String()))
 	if err != nil {
 		return err
 	}
 
-	err = deleteInProgressFile(jobKey)
+	err = DeleteInProgressFile(jobKey)
 	if err != nil {
 		return err
 	}
 
 	return nil
-}
-
-func getJobStatusFromJobState(initialJobState *JobState, k8sJob *kbatch.Job, pods []kcore.Pod) (*status.JobStatus, error) {
-	jobKey := initialJobState.JobKey
-
-	jobSpec, err := downloadJobSpec(jobKey)
-	if err != nil {
-		return nil, err
-	}
-
-	latestJobState := initialJobState // Refetch the state of an in progress job in case the cron modifies the job state between the time the initial fetch and now
-
-	if initialJobState.Status.IsInProgress() {
-		queueURL, err := getJobQueueURL(jobKey)
-		if err != nil {
-			return nil, err
-		}
-
-		latestJobCode, message, err := reconcileInProgressJob(initialJobState, &queueURL, k8sJob)
-		if err != nil {
-			return nil, err
-		}
-
-		if latestJobCode != initialJobState.Status {
-			err := errors.FirstError(
-				writeToJobLogStream(jobKey, message),
-				setStatusForJob(jobKey, latestJobCode),
-			)
-			if err != nil {
-				return nil, err
-			}
-		}
-
-		latestJobState, err = getJobState(jobKey)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	jobStatus := status.JobStatus{
-		Job:     *jobSpec,
-		EndTime: latestJobState.EndTime,
-		Status:  latestJobState.Status,
-	}
-
-	if latestJobState.Status.IsInProgress() {
-		queueMetrics, err := getQueueMetrics(jobKey)
-		if err != nil {
-			return nil, err
-		}
-
-		jobStatus.BatchesInQueue = queueMetrics.TotalUserMessages()
-
-		if latestJobState.Status == status.JobEnqueuing {
-			jobStatus.TotalBatchCount = queueMetrics.TotalUserMessages()
-		}
-
-		if latestJobState.Status == status.JobRunning {
-			metrics, err := getRealTimeBatchMetrics(jobKey)
-			if err != nil {
-				return nil, err
-			}
-			jobStatus.BatchMetrics = metrics
-
-			if k8sJob == nil {
-				err := setUnexpectedErrorStatus(jobKey)
-				if err != nil {
-					return nil, err
-				}
-
-				writeToJobLogStream(jobKey, fmt.Sprintf("unexpected: kubernetes job not found"))
-				deleteJobRuntimeResources(jobKey)
-
-				jobStatus.Status = status.JobUnexpectedError
-				return &jobStatus, nil
-			}
-
-			workerCounts := getWorkerCountsForJob(*k8sJob, pods)
-			jobStatus.WorkerCounts = &workerCounts
-		}
-	}
-
-	if latestJobState.Status.IsCompleted() {
-		metrics, err := getCompletedBatchMetrics(jobKey, jobSpec.StartTime, *latestJobState.EndTime)
-		if err != nil {
-			return nil, err
-		}
-		jobStatus.BatchMetrics = metrics
-	}
-
-	return &jobStatus, nil
-}
-
-func GetJobStatus(jobKey spec.JobKey) (*status.JobStatus, error) {
-	jobState, err := getJobState(jobKey)
-	if err != nil {
-		return nil, err
-	}
-
-	k8sJob, err := config.K8s.GetJob(jobKey.K8sName())
-	if err != nil {
-		return nil, err
-	}
-
-	pods, err := config.K8s.ListPodsByLabels(map[string]string{"apiName": jobKey.APIName, "jobID": jobKey.ID})
-	if err != nil {
-		return nil, err
-	}
-
-	return getJobStatusFromJobState(jobState, k8sJob, pods)
-}
-
-func getJobStatusFromK8sJob(jobKey spec.JobKey, k8sJob *kbatch.Job, pods []kcore.Pod) (*status.JobStatus, error) {
-	jobState, err := getJobState(jobKey)
-	if err != nil {
-		return nil, err
-	}
-
-	return getJobStatusFromJobState(jobState, k8sJob, pods)
 }
